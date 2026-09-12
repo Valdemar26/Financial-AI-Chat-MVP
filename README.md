@@ -1,61 +1,37 @@
-# FinancialAiChat
+# Financial AI Chat
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 21.2.7.
+Upload Excel/PDF financial data, ask questions about it in plain English, get back a text answer, a chart, or a table — chosen by the model, not by a UI toggle.
 
-## Development server
+**Live:** https://financial-ai-chat-mvp.vercel.app
 
-To start a local development server, run:
+## Stack
+
+- Angular 21 (standalone components, signals)
+- Chart.js for chart rendering, SheetJS (`xlsx`) for spreadsheet parsing
+- Claude (`claude-sonnet-4-6`) via the Anthropic Messages API, called through a Vercel Edge Function (`api/claude.js`) that holds the API key server-side
+- Deployed on Vercel
+
+## Running locally
 
 ```bash
+npm install
 ng serve
 ```
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
+The dev server proxies `/api/*` to the deployed function (see `proxy.conf.json`), so you need a Vercel deployment with `ANTHROPIC_API_KEY` set, or run `vercel dev` locally with a `.env.local` containing that key.
 
-## Code scaffolding
+## Engineering decisions
 
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+A few choices here aren't defaults you get from reading the Anthropic docs — worth knowing why they're there before an interview asks.
 
-```bash
-ng generate component component-name
-```
+- **`tool_choice: {type: 'any'}` used as the structured-output mechanism.** Every response — even a plain text answer — is forced through one of three tools (`answer_question`, `render_chart`, `render_table`). This removes free-text parsing entirely: the client never has to guess whether a response is prose or data, it only ever handles typed tool input.
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+- **Streaming is a transport detail here, not a progressive-render feature.** The client (`src/app/services/claude.ts`) reads the SSE stream manually — no Anthropic SDK stream helper — to get `usage` fields as early as possible and to accumulate `input_json_delta` chunks. But because the model is forced to call a tool, there's no plain-text content block to stream token-by-token into the UI; the full tool call is parsed once at `content_block_stop`. So streaming buys early usage data and an open connection, not a typing-indicator effect. Framing it as "token-by-token UI" would be inaccurate.
 
-```bash
-ng generate --help
-```
+- **Manual SSE parsing handles chunk boundaries explicitly.** `TextDecoder` runs in streaming mode, the buffer is split on `\n\n`, and the last (possibly incomplete) segment is put back rather than parsed — the standard spot where naive SSE clients silently drop or mis-parse a message that arrives split across two `read()` calls.
 
-## Building
+- **Prompt caching has two separate breakpoints, not one.** `cache_control: {type: 'ephemeral'}` is set on the system prompt and, independently, on each uploaded PDF document block. The PDF is only ever attached to the latest user message, so the cache breakpoint stays stable across turns instead of moving every time history grows.
 
-To build the project run:
+- **The server rebuilds the entire API payload — the client only supplies `messages` and raw file text.** `api/claude.js` fixes the model, `max_tokens`, `stream`, the system prompt template, and the tool definitions itself. Nothing in the client's request body — not even the tool schemas — reaches the Anthropic API unmodified. This closed a real gap: an earlier version forwarded the client's `system` string through with only a truthy check, which meant anyone hitting the endpoint directly (no auth exists) could run arbitrary prompts through the server's Anthropic key.
 
-```bash
-ng build
-```
-
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-## Running unit tests
-
-To execute unit tests with the [Vitest](https://vitest.dev/) test runner, use the following command:
-
-```bash
-ng test
-```
-
-## Running end-to-end tests
-
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
-# Financial-AI-Chat-MVP
-# Financial-AI-Chat-MVP
+- **There's no rate limiting on the endpoint, and that's a known, accepted gap — not an oversight.** An in-memory per-IP counter used to sit here, but on Vercel's Edge Runtime each instance has its own memory, so it never enforced a real shared limit. It's been removed rather than left in as false reassurance. What actually bounds the blast radius today is that the endpoint can only run one fixed job (fixed model, fixed prompt, fixed tools) — not request volume, which is currently unbounded. A shared counter (Upstash/Vercel KV) is the correct fix and is deliberately not in this codebase yet.

@@ -1,29 +1,75 @@
 export const config = { runtime: 'edge' };
 
-// Server-side policy — the client cannot override any of this.
+// Server-side policy — the client cannot override any of this. The client only
+// ever sends `messages` (chat history, plus any PDF documents already embedded
+// in the last user message) and `context` (the raw extracted file data as
+// plain text). It never sends system, tools, or tool_choice — those are fixed
+// here so a request can never be turned into a proxy for arbitrary prompts.
 const MODEL = 'claude-sonnet-4-6';
 const MAX_TOKENS = 4096;
 const MAX_BODY_BYTES = 6 * 1024 * 1024; // uploaded PDFs arrive base64-encoded
-const ALLOWED_TOOLS = new Set(['answer_question', 'render_chart', 'render_table']);
 
-// Simple in-memory per-IP limiter. Edge instances are short-lived, so this is a
-// speed bump against casual abuse, not a hard guarantee. For anything stronger,
-// move the counter to Vercel KV / Upstash.
-const WINDOW_MS = 60_000;
-const MAX_REQUESTS_PER_WINDOW = 20;
-const hits = new Map();
+const TOOLS = [
+  {
+    name: 'answer_question',
+    description: 'Return a plain text answer to the user question',
+    input_schema: {
+      type: 'object',
+      properties: { text: { type: 'string' } },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'render_chart',
+    description: 'Render a chart when user asks for visualization, graph, or chart',
+    input_schema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['bar', 'doughnut', 'pie', 'line'] },
+        title: { type: 'string' },
+        labels: { type: 'array', items: { type: 'string' } },
+        datasets: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              label: { type: 'string' },
+              data: { type: 'array', items: { type: 'number' } },
+            },
+          },
+        },
+        summary: { type: 'string' },
+      },
+      required: ['type', 'title', 'labels', 'datasets', 'summary'],
+    },
+  },
+  {
+    name: 'render_table',
+    description: 'Render a data table when user asks for a list, top-N, or comparison',
+    input_schema: {
+      type: 'object',
+      properties: {
+        columns: { type: 'array', items: { type: 'string' } },
+        rows: { type: 'array', items: { type: 'array' } },
+        summary: { type: 'string' },
+      },
+      required: ['columns', 'rows', 'summary'],
+    },
+  },
+];
 
-function rateLimited(ip) {
-  const now = Date.now();
-  const entry = hits.get(ip);
+function systemPrompt(context) {
+  return `You are a financial data analyst. Analyze the data below and answer questions accurately.
 
-  if (!entry || now - entry.start > WINDOW_MS) {
-    hits.set(ip, { start: now, count: 1 });
-    return false;
-  }
+  The user has uploaded one or more files. Each file is marked with "=== FILE: filename ===".
+  When relevant, treat them as related data sources — for example, financial data and location data may correlate. Mention which file the answer comes from when it adds clarity.
 
-  entry.count += 1;
-  return entry.count > MAX_REQUESTS_PER_WINDOW;
+  ${context}
+
+  Always call exactly one tool per response:
+  - answer_question → for text answers
+  - render_chart → when user asks for chart/graph/visualization
+  - render_table → when user asks for list, top-N, ranking, or comparison table`;
 }
 
 function json(payload, status) {
@@ -43,14 +89,8 @@ export default async function handler(req) {
     return json({ error: 'API key not configured' }, 500);
   }
 
-  const ip =
-    req.headers.get('x-forwarded-for')?.split(',')[0].trim() ??
-    req.headers.get('x-real-ip') ??
-    'unknown';
-
-  if (rateLimited(ip)) {
-    return json({ error: 'Rate limit exceeded. Please wait a minute.' }, 429);
-  }
+  // No rate limiting here — see note below the payload rebuild for why that's
+  // an intentional gap, not an oversight.
 
   let raw;
   try {
@@ -74,21 +114,41 @@ export default async function handler(req) {
     return json({ error: 'messages must be a non-empty array' }, 400);
   }
 
-  // Only forward the tools this app actually defines.
-  const tools = Array.isArray(incoming.tools)
-    ? incoming.tools.filter((t) => ALLOWED_TOOLS.has(t?.name))
-    : undefined;
+  if (incoming.context !== undefined && typeof incoming.context !== 'string') {
+    return json({ error: 'context must be a string' }, 400);
+  }
 
-  // Rebuild the payload explicitly. Anything the client sent that is not on this
-  // list is dropped — model, max_tokens and stream are decided here.
+  // Rebuild the payload from scratch. The client cannot influence model,
+  // max_tokens, stream, system, tools, or tool_choice — only `messages` and
+  // `context` (raw file text) cross the wire from it. This is what keeps the
+  // endpoint from being repurposed as a general-purpose proxy to the key: even
+  // with no auth, a caller can only ever run "financial data analyst over the
+  // data it sends" through these three fixed tools, never an arbitrary prompt
+  // or an arbitrary tool schema.
   const payload = {
     model: MODEL,
     max_tokens: MAX_TOKENS,
     stream: true,
+    system: [
+      {
+        type: 'text',
+        text: systemPrompt(incoming.context ?? ''),
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
+    tools: TOOLS,
+    tool_choice: { type: 'any' },
     messages: incoming.messages,
-    ...(incoming.system ? { system: incoming.system } : {}),
-    ...(tools?.length ? { tools, tool_choice: { type: 'any' } } : {}),
   };
+
+  // There is deliberately no rate limiter here anymore (the previous in-memory
+  // per-IP counter didn't work anyway — Edge Runtime spins up multiple
+  // isolated instances, each with its own Map, so it never actually enforced
+  // a shared limit). What bounds abuse now is that this endpoint can only do
+  // one fixed job — the model, system prompt and tools above are not
+  // negotiable from the request — not request volume. Volume itself is
+  // unbounded until a real shared counter (Upstash/Vercel KV) is added; that
+  // is a known, accepted gap, not something to route around.
 
   try {
     const upstream = await fetch('https://api.anthropic.com/v1/messages', {

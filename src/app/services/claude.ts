@@ -1,5 +1,4 @@
 import { Injectable } from '@angular/core';
-import { parse, Allow } from 'partial-json';
 import { ChartData } from '../components/chart/chart';
 import { UploadedFile } from './excel-parser';
 
@@ -33,72 +32,50 @@ export interface StreamCallbacks {
   onError: (error: string) => void;
 }
 
-const TOOLS = [
-  {
-    name: 'answer_question',
-    description: 'Return a plain text answer to the user question',
-    input_schema: {
-      type: 'object',
-      properties: { text: { type: 'string' } },
-      required: ['text']
-    }
-  },
-  {
-    name: 'render_chart',
-    description: 'Render a chart when user asks for visualization, graph, or chart',
-    input_schema: {
-      type: 'object',
-      properties: {
-        type: { type: 'string', enum: ['bar', 'doughnut', 'pie', 'line'] },
-        title: { type: 'string' },
-        labels: { type: 'array', items: { type: 'string' } },
-        datasets: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              label: { type: 'string' },
-              data: { type: 'array', items: { type: 'number' } }
-            }
-          }
-        },
-        summary: { type: 'string' }
-      },
-      required: ['type', 'title', 'labels', 'datasets', 'summary']
-    }
-  },
-  {
-    name: 'render_table',
-    description: 'Render a data table when user asks for a list, top-N, or comparison',
-    input_schema: {
-      type: 'object',
-      properties: {
-        columns: { type: 'array', items: { type: 'string' } },
-        rows: { type: 'array', items: { type: 'array' } },
-        summary: { type: 'string' }
-      },
-      required: ['columns', 'rows', 'summary']
-    }
-  }
-];
+const CHART_TYPES: ChartData['type'][] = ['bar', 'doughnut', 'pie', 'line'];
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(v => typeof v === 'string');
+}
+
+function isNumberArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.every(v => typeof v === 'number');
+}
+
+function isChartInput(input: unknown): input is ChartData & { summary?: string } {
+  if (typeof input !== 'object' || input === null) return false;
+  const i = input as Record<string, unknown>;
+  return (
+    typeof i['type'] === 'string' &&
+    CHART_TYPES.includes(i['type'] as ChartData['type']) &&
+    typeof i['title'] === 'string' &&
+    isStringArray(i['labels']) &&
+    Array.isArray(i['datasets']) &&
+    i['datasets'].every(ds =>
+      typeof ds === 'object' && ds !== null &&
+      typeof (ds as Record<string, unknown>)['label'] === 'string' &&
+      isNumberArray((ds as Record<string, unknown>)['data'])
+    )
+  );
+}
+
+function isTableInput(input: unknown): input is TableData & { summary?: string } {
+  if (typeof input !== 'object' || input === null) return false;
+  const i = input as Record<string, unknown>;
+  return (
+    isStringArray(i['columns']) &&
+    Array.isArray(i['rows']) &&
+    i['rows'].every(row => Array.isArray(row))
+  );
+}
 
 @Injectable({ providedIn: 'root' })
 export class ClaudeService {
   private readonly API_URL = '/api/claude';
-  private systemPrompt = '';
+  private dataContext = '';
 
   setDataContext(context: string): void {
-    this.systemPrompt = `You are a financial data analyst. Analyze the data below and answer questions accurately.
-
-  The user has uploaded one or more files. Each file is marked with "=== FILE: filename ===".
-  When relevant, treat them as related data sources — for example, financial data and location data may correlate. Mention which file the answer comes from when it adds clarity.
-
-  ${context}
-
-  Always call exactly one tool per response:
-  - answer_question → for text answers
-  - render_chart → when user asks for chart/graph/visualization
-  - render_table → when user asks for list, top-N, ranking, or comparison table`;
+    this.dataContext = context;
   }
 
   async chatStream(
@@ -139,21 +116,9 @@ export class ClaudeService {
       response = await fetch(this.API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 4096,
-          stream: true,
-          system: [
-            {
-              type: 'text',
-              text: this.systemPrompt,
-              cache_control: { type: 'ephemeral' }
-            }
-          ],
-          tools: TOOLS,
-          tool_choice: { type: 'any' },
-          messages
-        }),
+        // Model, system prompt and tools are decided by the server — the
+        // client only supplies the conversation and the raw file data.
+        body: JSON.stringify({ messages, context: this.dataContext }),
         signal
       });
     } catch (e: any) {
@@ -265,8 +230,11 @@ export class ClaudeService {
     }
   }
 
-  private buildResult(toolName: string, input: any): ClaudeResponse {
+  private buildResult(toolName: string, input: unknown): ClaudeResponse {
     if (toolName === 'render_chart') {
+      if (!isChartInput(input)) {
+        return { answer: '⚠️ The model returned chart data in an unexpected format, so it could not be rendered. Try rephrasing the question.' };
+      }
       return {
         answer: input.summary ?? '',
         chart: {
@@ -278,6 +246,9 @@ export class ClaudeService {
       };
     }
     if (toolName === 'render_table') {
+      if (!isTableInput(input)) {
+        return { answer: '⚠️ The model returned table data in an unexpected format, so it could not be rendered. Try rephrasing the question.' };
+      }
       return {
         answer: input.summary ?? '',
         table: {
@@ -286,6 +257,7 @@ export class ClaudeService {
         }
       };
     }
-    return { answer: input.text ?? '' };
+    const text = (input as Record<string, unknown> | null)?.['text'];
+    return { answer: typeof text === 'string' ? text : '' };
   }
 }

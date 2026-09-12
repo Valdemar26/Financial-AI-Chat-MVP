@@ -8,6 +8,14 @@ import { TableData } from './services/claude';
 import { DashboardService } from './services/dashboard';
 import { DashboardComponent } from './components/dashboard/dashboard';
 
+// Sonnet 4-6 pricing, USD per 1M tokens.
+const PRICE_PER_MILLION = {
+  input: 3,
+  cacheWrite: 3.75,
+  cacheRead: 0.30,
+  output: 15
+};
+
 interface DisplayMessage {
   role: 'user' | 'assistant';
   text: string;
@@ -47,6 +55,12 @@ export class AppComponent {
     'Which leases expire in 2026?'
   ];
   readonly sessionCost = signal(0);
+  readonly sessionCacheSavings = signal(0);
+  readonly sessionCostWithoutCache = computed(() => this.sessionCost() + this.sessionCacheSavings());
+  readonly cacheSavingsPercent = computed(() => {
+    const withoutCache = this.sessionCostWithoutCache();
+    return withoutCache > 0 ? (this.sessionCacheSavings() / withoutCache) * 100 : 0;
+  });
 
   private chatHistory: ChatMessage[] = [];
   private abortController?: AbortController;
@@ -126,6 +140,7 @@ export class AppComponent {
     this.messages.set([]);
     this.chatHistory = [];
     this.sessionCost.set(0);
+    this.sessionCacheSavings.set(0);
   }
 
   private refreshContext(): void {
@@ -205,13 +220,17 @@ export class AppComponent {
   }
 
   private addToSessionCost(usage: CacheStats): void {
-    // Sonnet 4-6 pricing per million tokens
     const cost =
-      (usage.inputTokens * 3 +
-      usage.cacheWritten * 3.75 +
-      usage.cacheRead * 0.30 +
-      usage.outputTokens * 15) / 1_000_000;
+      (usage.inputTokens * PRICE_PER_MILLION.input +
+      usage.cacheWritten * PRICE_PER_MILLION.cacheWrite +
+      usage.cacheRead * PRICE_PER_MILLION.cacheRead +
+      usage.outputTokens * PRICE_PER_MILLION.output) / 1_000_000;
     this.sessionCost.update(c => c + cost);
+
+    // What the cache-read tokens would have cost at the normal input price,
+    // minus what they actually cost at the cache-read price.
+    const savings = (usage.cacheRead * (PRICE_PER_MILLION.input - PRICE_PER_MILLION.cacheRead)) / 1_000_000;
+    this.sessionCacheSavings.update(s => s + savings);
   }
 
   stopGeneration(): void {
