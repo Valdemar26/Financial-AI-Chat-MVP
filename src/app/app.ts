@@ -1,12 +1,14 @@
-import { Component, signal, computed, inject } from '@angular/core';
+import { Component, OnInit, signal, computed, inject } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
 import { ExcelParserService, UploadedFile } from './services/excel-parser';
-import { ClaudeService, ChatMessage, ClaudeResponse, CacheStats } from './services/claude';
+import { ClaudeService, ClaudeResponse, CacheStats } from './services/claude';
 import { ChartComponent, ChartData } from './components/chart/chart';
 import { TableComponent } from './components/table/table';
 import { TableData } from './services/claude';
 import { DashboardService } from './services/dashboard';
 import { DashboardComponent } from './components/dashboard/dashboard';
+import { AuthService } from './services/auth';
 
 // Sonnet 4-6 pricing, USD per 1M tokens.
 const PRICE_PER_MILLION = {
@@ -31,13 +33,13 @@ interface DisplayMessage {
 }
 
 @Component({
-  selector: 'app-root',
+  selector: 'app-chat',
   standalone: true,
   imports: [FormsModule, ChartComponent, TableComponent, DashboardComponent],
   templateUrl: './app.html',
   styleUrl: './app.scss'
 })
-export class AppComponent {
+export class AppComponent implements OnInit {
   readonly files = signal<UploadedFile[]>([]);
   readonly messages = signal<DisplayMessage[]>([]);
   readonly userInput = signal('');
@@ -47,6 +49,10 @@ export class AppComponent {
   readonly dashboard = inject(DashboardService);
   readonly hasFiles = computed(() => this.files().length > 0);
   readonly pinnedCount = computed(() => this.dashboard.pinnedCharts().length);
+
+  private readonly auth = inject(AuthService);
+  private readonly router = inject(Router);
+  readonly currentUserEmail = computed(() => this.auth.currentUser()?.email ?? '');
 
   readonly suggestedQuestions = [
     'Show offices by region',
@@ -62,13 +68,30 @@ export class AppComponent {
     return withoutCache > 0 ? (this.sessionCacheSavings() / withoutCache) * 100 : 0;
   });
 
-  private chatHistory: ChatMessage[] = [];
   private abortController?: AbortController;
 
   constructor(
     private excelParser: ExcelParserService,
     private claude: ClaudeService
   ) {}
+
+  async ngOnInit(): Promise<void> {
+    const id = this.claude.conversationId();
+    if (!id) return;
+
+    const conversation = await this.claude.loadConversation(id);
+    if (!conversation) return;
+
+    this.messages.set(
+      this.claude.restoreMessages(conversation.messages).map(m => ({ ...m, loading: false }))
+    );
+  }
+
+  async logout(): Promise<void> {
+    await this.auth.logout();
+    this.claude.resetConversation();
+    this.router.navigateByUrl('/login');
+  }
 
   togglePin(msg: DisplayMessage): void {
     if (!msg.chart || !msg.query) return;
@@ -131,21 +154,20 @@ export class AppComponent {
     this.refreshContext();
     if (this.files().length === 0) {
       this.messages.set([]);
-      this.chatHistory = [];
+      this.claude.resetConversation();
     }
   }
 
   clearAll(): void {
     this.files.set([]);
     this.messages.set([]);
-    this.chatHistory = [];
     this.sessionCost.set(0);
     this.sessionCacheSavings.set(0);
+    this.claude.resetConversation();
   }
 
   private refreshContext(): void {
     if (this.files().length === 0) {
-      this.chatHistory = [];
       return;
     }
     const context = this.excelParser.filesToContext(this.files());
@@ -160,18 +182,15 @@ export class AppComponent {
     const loadingMsg: DisplayMessage = { role: 'assistant', text: '', loading: true };
     this.messages.update(msgs => [...msgs, { role: 'user', text }, loadingMsg]);
 
-    const newHistory: ChatMessage[] = [...this.chatHistory, { role: 'user', content: text }];
     this.isLoading.set(true);
     this.abortController = new AbortController();
 
-    const pdfs = this.files().filter(f => f.type === 'pdf');
+    const documentIds = this.files()
+      .filter(f => f.type === 'pdf' && f.documentId)
+      .map(f => f.documentId!);
 
-    await this.claude.chatStream(newHistory, pdfs, {
-      onText: () => {},
-
+    await this.claude.chatStream(text, documentIds, {
       onDone: (result: ClaudeResponse) => {
-        this.chatHistory = [...newHistory, { role: 'assistant', content: result.answer }];
-
         this.messages.update(msgs =>
           msgs.map(m => m === loadingMsg ? {
             role: 'assistant' as const,

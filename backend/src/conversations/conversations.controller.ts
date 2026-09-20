@@ -63,14 +63,16 @@ export class ConversationsController {
     await this.conversations.findOwned(id, req.user.userId);
     await this.conversations.addUserMessage(id, dto.content);
 
+    const documentBlocks = await this.conversations.resolveDocumentBlocks(dto.documentIds, req.user.userId);
     const history = await this.conversations.getHistory(id);
+    const messages = this.conversations.withDocumentBlocks(history, documentBlocks);
 
     const abortController = new AbortController();
     res.on('close', () => abortController.abort());
 
     let upstream: globalThis.Response;
     try {
-      upstream = await this.anthropic.streamMessage(history, dto.context ?? '', abortController.signal);
+      upstream = await this.anthropic.streamMessage(messages, dto.context ?? '', abortController.signal);
     } catch {
       res.status(HttpStatus.BAD_GATEWAY).json({ error: 'Upstream request failed' });
       return;

@@ -67,6 +67,16 @@ export class AuthService {
     return this.issueTokens(stored.user.id, stored.user.email);
   }
 
+  async logout(refreshToken: string | undefined): Promise<void> {
+    if (!refreshToken) return;
+
+    const tokenHash = this.hashToken(refreshToken);
+    await this.prisma.refreshToken.updateMany({
+      where: { tokenHash, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
+
   private async issueTokens(userId: string, email: string): Promise<TokenPair> {
     const accessToken = await this.jwt.signAsync({ sub: userId, email });
 

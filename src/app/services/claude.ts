@@ -1,11 +1,9 @@
-import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Injectable, inject, signal } from '@angular/core';
+import { firstValueFrom } from 'rxjs';
+import { environment } from '../../environments/environment';
 import { ChartData } from '../components/chart/chart';
-import { UploadedFile } from './excel-parser';
-
-export interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
+import { AuthService } from './auth';
 
 export interface TableData {
   columns: string[];
@@ -27,11 +25,30 @@ export interface ClaudeResponse {
 }
 
 export interface StreamCallbacks {
-  onText: (delta: string) => void;
   onDone: (result: ClaudeResponse) => void;
   onError: (error: string) => void;
 }
 
+export interface PersistedMessage {
+  role: string;
+  content: string;
+  toolUse?: unknown;
+}
+
+export interface ConversationDetail {
+  id: string;
+  title: string | null;
+  messages: PersistedMessage[];
+}
+
+export interface RestoredMessage {
+  role: 'user' | 'assistant';
+  text: string;
+  chart?: ChartData;
+  table?: TableData;
+}
+
+const CONVERSATION_STORAGE_KEY = 'activeConversationId';
 const CHART_TYPES: ChartData['type'][] = ['bar', 'doughnut', 'pie', 'line'];
 
 function isStringArray(value: unknown): value is string[] {
@@ -71,54 +88,87 @@ function isTableInput(input: unknown): input is TableData & { summary?: string }
 
 @Injectable({ providedIn: 'root' })
 export class ClaudeService {
-  private readonly API_URL = '/api/claude';
+  private readonly http = inject(HttpClient);
+  private readonly auth = inject(AuthService);
   private dataContext = '';
+
+  readonly conversationId = signal<string | null>(this.readStoredConversationId());
 
   setDataContext(context: string): void {
     this.dataContext = context;
   }
 
+  async ensureConversation(): Promise<string> {
+    const existing = this.conversationId();
+    if (existing) return existing;
+
+    const created = await firstValueFrom(
+      this.http.post<{ id: string }>(`${environment.apiUrl}/conversations`, {}, { withCredentials: true })
+    );
+    this.conversationId.set(created.id);
+    this.storeConversationId(created.id);
+    return created.id;
+  }
+
+  async loadConversation(id: string): Promise<ConversationDetail | null> {
+    try {
+      const conversation = await firstValueFrom(
+        this.http.get<ConversationDetail>(`${environment.apiUrl}/conversations/${id}`, { withCredentials: true })
+      );
+      this.conversationId.set(id);
+      return conversation;
+    } catch {
+      this.resetConversation();
+      return null;
+    }
+  }
+
+  resetConversation(): void {
+    this.conversationId.set(null);
+    this.storeConversationId(null);
+  }
+
+  restoreMessages(messages: PersistedMessage[]): RestoredMessage[] {
+    return messages.map(m => {
+      if (m.role !== 'assistant') {
+        return { role: 'user' as const, text: m.content };
+      }
+      const result = this.toClaudeResponse(m.content, m.toolUse);
+      return { role: 'assistant' as const, text: result.answer, chart: result.chart, table: result.table };
+    });
+  }
+
   async chatStream(
-    history: ChatMessage[], 
-    pdfs: UploadedFile[],
+    text: string,
+    documentIds: string[],
     callbacks: StreamCallbacks,
     signal?: AbortSignal
   ): Promise<void> {
+    const conversationId = await this.ensureConversation();
+    await this.streamWithRetry(conversationId, text, documentIds, callbacks, signal, false);
+  }
 
-    // Build messages array, prepending PDFs to the LATEST user message
-    const messages = history.map((msg, idx) => {
-      const isLatestUserMessage = idx === history.length - 1 && msg.role === 'user';
-
-      if (isLatestUserMessage && pdfs.length > 0) {
-        return {
-          role: 'user',
-          content: [
-            ...pdfs.map(pdf => ({
-              type: 'document',
-              source: {
-                type: 'base64',
-                media_type: 'application/pdf',
-                data: pdf.base64
-              },
-              cache_control: { type: 'ephemeral' }
-            })),
-            { type: 'text', text: msg.content }
-          ]
-        };
-      }
-
-      return msg;
-    });
+  private async streamWithRetry(
+    conversationId: string,
+    text: string,
+    documentIds: string[],
+    callbacks: StreamCallbacks,
+    signal: AbortSignal | undefined,
+    isRetry: boolean
+  ): Promise<void> {
+    const token = this.auth.accessToken();
 
     let response: Response;
 
     try {
-      response = await fetch(this.API_URL, {
+      response = await fetch(`${environment.apiUrl}/conversations/${conversationId}/messages`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // Model, system prompt and tools are decided by the server — the
-        // client only supplies the conversation and the raw file data.
-        body: JSON.stringify({ messages, context: this.dataContext }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        credentials: 'include',
+        body: JSON.stringify({ content: text, context: this.dataContext, documentIds }),
         signal
       });
     } catch (e: any) {
@@ -128,6 +178,16 @@ export class ClaudeService {
       }
       callbacks.onError(`Network error: ${e?.message ?? e}`);
       return;
+    }
+
+    if (response.status === 401 && !isRetry) {
+      try {
+        await this.auth.refreshToken();
+      } catch {
+        callbacks.onError('Session expired. Please sign in again.');
+        return;
+      }
+      return this.streamWithRetry(conversationId, text, documentIds, callbacks, signal, true);
     }
 
     if (!response.ok) {
@@ -149,7 +209,6 @@ export class ClaudeService {
 
     let currentToolName = '';
     let accumulatedJson = '';
-    let lastStreamedText = '';
     let cacheStats: CacheStats | undefined;
 
     const reader = response.body!.getReader();
@@ -201,7 +260,6 @@ export class ClaudeService {
           if (event.type === 'content_block_start') {
             currentToolName = event.content_block?.name ?? '';
             accumulatedJson = '';
-            lastStreamedText = '';
             continue;
           }
 
@@ -227,6 +285,26 @@ export class ClaudeService {
         return;
       }
       callbacks.onError(`Stream error: ${e?.message ?? e}`);
+    }
+  }
+
+  private readStoredConversationId(): string | null {
+    try {
+      return sessionStorage.getItem(CONVERSATION_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  }
+
+  private storeConversationId(id: string | null): void {
+    try {
+      if (id) {
+        sessionStorage.setItem(CONVERSATION_STORAGE_KEY, id);
+      } else {
+        sessionStorage.removeItem(CONVERSATION_STORAGE_KEY);
+      }
+    } catch {
+      // sessionStorage unavailable (e.g. private browsing) — conversation just won't survive reload.
     }
   }
 
@@ -259,5 +337,31 @@ export class ClaudeService {
     }
     const text = (input as Record<string, unknown> | null)?.['text'];
     return { answer: typeof text === 'string' ? text : '' };
+  }
+
+  // Used to reconstruct chart/table results from persisted messages, where
+  // the tool name itself isn't stored — only the raw tool input JSON is.
+  private toClaudeResponse(content: string, toolUse: unknown): ClaudeResponse {
+    if (isChartInput(toolUse)) {
+      return {
+        answer: toolUse.summary ?? content,
+        chart: {
+          type: toolUse.type,
+          title: toolUse.title,
+          labels: toolUse.labels,
+          datasets: toolUse.datasets
+        }
+      };
+    }
+    if (isTableInput(toolUse)) {
+      return {
+        answer: toolUse.summary ?? content,
+        table: {
+          columns: toolUse.columns,
+          rows: toolUse.rows
+        }
+      };
+    }
+    return { answer: content };
   }
 }

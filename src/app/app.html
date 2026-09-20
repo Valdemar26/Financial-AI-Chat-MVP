@@ -40,6 +40,11 @@
     @if (hasFiles() && currentView() === 'chat') {
       <button class="clear-btn" data-cy="clear-all-btn" (click)="clearAll()">Clear all</button>
     }
+
+    @if (currentUserEmail()) {
+      <span class="current-user" data-cy="current-user">{{ currentUserEmail() }}</span>
+    }
+    <button class="clear-btn" data-cy="logout-btn" (click)="logout()">Log out</button>
   </header>
 
   @if (currentView() === 'dashboard') {

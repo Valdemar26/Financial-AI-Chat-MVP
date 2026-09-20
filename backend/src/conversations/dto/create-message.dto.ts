@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MinLength } from 'class-validator';
+import { IsArray, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class CreateMessageDto {
   @IsString()
@@ -8,4 +8,9 @@ export class CreateMessageDto {
   @IsOptional()
   @IsString()
   context?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  documentIds?: string[];
 }

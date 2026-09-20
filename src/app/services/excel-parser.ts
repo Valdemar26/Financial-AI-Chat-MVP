@@ -1,5 +1,9 @@
-import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { Injectable, inject } from '@angular/core';
+import { firstValueFrom } from 'rxjs';
 import * as XLSX from 'xlsx';
+import { environment } from '../../environments/environment';
+import { ClaudeService } from './claude';
 
 export interface ParsedSheet {
   name: string;
@@ -14,21 +18,47 @@ export interface UploadedFile {
   type: FileType;
   sheets?: ParsedSheet[];   // for Excel
   base64?: string;          // for PDF
+  documentId?: string;      // backend Document id, once persisted
 }
 
 @Injectable({ providedIn: 'root' })
 export class ExcelParserService {
+  private readonly http = inject(HttpClient);
+  private readonly claude = inject(ClaudeService);
 
   async parseFile(file: File): Promise<UploadedFile> {
     const isPdf = file.name.toLowerCase().endsWith('.pdf');
 
-    if (isPdf) {
-      const base64 = await this.fileToBase64(file);
-      return { name: file.name, type: 'pdf', base64 };
+    const uploaded: UploadedFile = isPdf
+      ? { name: file.name, type: 'pdf', base64: await this.fileToBase64(file) }
+      : { name: file.name, type: 'excel', sheets: await this.parseExcel(file) };
+
+    // For PDFs, this id is what lets the backend fetch the file back out of
+    // Storage and hand it to Claude as a document block — it's not just
+    // persistence bookkeeping. Excel's text context is still parsed above
+    // and is unaffected either way.
+    try {
+      uploaded.documentId = await this.persistRawFile(file);
+    } catch (err) {
+      console.error(`Failed to persist "${file.name}" to the backend`, err);
     }
 
-    const sheets = await this.parseExcel(file);
-    return { name: file.name, type: 'excel', sheets };
+    return uploaded;
+  }
+
+  private async persistRawFile(file: File): Promise<string> {
+    const conversationId = await this.claude.ensureConversation();
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const document = await firstValueFrom(
+      this.http.post<{ id: string }>(
+        `${environment.apiUrl}/conversations/${conversationId}/documents`,
+        formData,
+        { withCredentials: true }
+      )
+    );
+    return document.id;
   }
 
   private fileToBase64(file: File): Promise<string> {

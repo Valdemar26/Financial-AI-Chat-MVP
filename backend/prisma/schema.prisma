@@ -33,13 +33,14 @@ model RefreshToken {
 }
 
 model Conversation {
-  id        String    @id @default(uuid())
-  userId    String    @map("user_id")
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id        String     @id @default(uuid())
+  userId    String     @map("user_id")
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   title     String?
   messages  Message[]
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
+  documents Document[]
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
 
   @@map("conversations")
   @@index([userId, updatedAt])
@@ -59,4 +60,18 @@ model Message {
 
   @@map("messages")
   @@index([conversationId, createdAt])
+}
+
+model Document {
+  id             String       @id @default(uuid())
+  conversationId String       @map("conversation_id")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  filename       String
+  mimeType       String       @map("mime_type")
+  sizeBytes      Int          @map("size_bytes")
+  storageKey     String       @map("storage_key")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@map("documents")
+  @@index([conversationId])
 }

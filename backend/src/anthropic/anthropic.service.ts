@@ -71,9 +71,26 @@ function systemPrompt(context: string): string {
   - render_table → when user asks for list, top-N, ranking, or comparison table`;
 }
 
+export interface AnthropicTextBlock {
+  type: 'text';
+  text: string;
+}
+
+export interface AnthropicDocumentBlock {
+  type: 'document';
+  source: {
+    type: 'base64';
+    media_type: string;
+    data: string;
+  };
+  cache_control?: { type: 'ephemeral' };
+}
+
+export type AnthropicContentBlock = AnthropicTextBlock | AnthropicDocumentBlock;
+
 export interface AnthropicMessage {
   role: 'user' | 'assistant';
-  content: string;
+  content: string | AnthropicContentBlock[];
 }
 
 export interface AnthropicUsage {

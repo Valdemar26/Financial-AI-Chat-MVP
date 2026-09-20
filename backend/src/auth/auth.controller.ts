@@ -44,12 +44,36 @@ export class AuthController {
     return { accessToken };
   }
 
+  @HttpCode(HttpStatus.OK)
+  @Post('logout')
+  async logout(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ success: true }> {
+    const token = req.cookies?.[REFRESH_COOKIE_NAME] as string | undefined;
+    await this.authService.logout(token);
+    res.clearCookie(REFRESH_COOKIE_NAME, this.cookieOptions());
+    return { success: true };
+  }
+
   private setRefreshCookie(res: Response, token: string): void {
     res.cookie(REFRESH_COOKIE_NAME, token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'lax',
+      ...this.cookieOptions(),
       maxAge: REFRESH_COOKIE_MAX_AGE_MS,
     });
+  }
+
+  // `path` must be explicit and identical on every set/clear call — without
+  // it, browsers default the cookie's path to the directory of whichever
+  // /auth/* endpoint set it, while Express's clearCookie() defaults to '/'.
+  // That mismatch means clearCookie silently fails to remove the cookie the
+  // browser actually stored, so logout doesn't revoke the session.
+  private cookieOptions() {
+    return {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax' as const,
+      path: '/',
+    };
   }
 }
