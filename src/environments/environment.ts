@@ -1,4 +1,4 @@
 export const environment = {
   production: false,
-  apiUrl: '',
+  apiUrl: 'https://financial-ai-chat-mvp-production.up.railway.app',
 };
