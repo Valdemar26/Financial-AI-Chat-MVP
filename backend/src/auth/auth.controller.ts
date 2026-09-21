@@ -1,4 +1,5 @@
 import { Body, Controller, HttpCode, HttpStatus, Post, Req, Res } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service.js';
 import { LoginDto } from './dto/login.dto.js';
@@ -9,7 +10,10 @@ const REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly config: ConfigService,
+  ) {}
 
   @Post('register')
   async register(
@@ -68,11 +72,17 @@ export class AuthController {
   // /auth/* endpoint set it, while Express's clearCookie() defaults to '/'.
   // That mismatch means clearCookie silently fails to remove the cookie the
   // browser actually stored, so logout doesn't revoke the session.
+  //
+  // In production the frontend (vercel.app) and backend (railway.app) are
+  // different sites, so the cookie must be SameSite=None to survive
+  // cross-site requests — which in turn requires Secure. Locally both run
+  // on the same site (or plain http), so we keep Lax there.
   private cookieOptions() {
+    const isLocal = this.config.get<string>('NODE_ENV') !== 'production';
     return {
       httpOnly: true,
-      secure: true,
-      sameSite: 'lax' as const,
+      secure: !isLocal,
+      sameSite: isLocal ? ('lax' as const) : ('none' as const),
       path: '/',
     };
   }
