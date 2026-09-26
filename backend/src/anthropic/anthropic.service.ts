@@ -8,6 +8,15 @@ import { ConfigService } from '@nestjs/config';
 const MODEL = 'claude-sonnet-4-6';
 const MAX_TOKENS = 4096;
 
+// Sonnet 4-6 pricing, USD per 1M tokens. Mirrors the frontend's
+// PRICE_PER_MILLION (src/app/app.ts) so cost is computed once, server-side.
+const PRICE_PER_MILLION = {
+  input: 3,
+  cacheWrite: 3.75,
+  cacheRead: 0.3,
+  output: 15,
+};
+
 const TOOLS = [
   {
     name: 'answer_question',
@@ -104,6 +113,18 @@ export interface AnthropicStreamResult {
   toolName: string;
   input: unknown;
   usage: AnthropicUsage;
+  durationMs: number;
+  costUsd: number;
+}
+
+function computeCostUsd(usage: AnthropicUsage): number {
+  return (
+    (usage.inputTokens * PRICE_PER_MILLION.input +
+      usage.cacheWrittenTokens * PRICE_PER_MILLION.cacheWrite +
+      usage.cacheReadTokens * PRICE_PER_MILLION.cacheRead +
+      usage.outputTokens * PRICE_PER_MILLION.output) /
+    1_000_000
+  );
 }
 
 @Injectable()
@@ -154,6 +175,7 @@ export class AnthropicService {
     body: ReadableStream<Uint8Array>,
     onChunk: (chunk: Uint8Array) => void,
   ): Promise<AnthropicStreamResult> {
+    const startedAt = Date.now();
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -231,7 +253,13 @@ export class AnthropicService {
       }
     }
 
-    return { toolName: finalToolName, input: finalInput, usage };
+    return {
+      toolName: finalToolName,
+      input: finalInput,
+      usage,
+      durationMs: Date.now() - startedAt,
+      costUsd: computeCostUsd(usage),
+    };
   }
 }
 

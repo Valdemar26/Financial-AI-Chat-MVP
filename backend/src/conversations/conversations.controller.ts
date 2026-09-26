@@ -89,9 +89,12 @@ export class ConversationsController {
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
 
-    const { toolName, input, usage } = await this.anthropic.consumeStream(upstream.body, (chunk) => {
-      res.write(chunk);
-    });
+    const { toolName, input, usage, durationMs, costUsd } = await this.anthropic.consumeStream(
+      upstream.body,
+      (chunk) => {
+        res.write(chunk);
+      },
+    );
 
     res.end();
 
@@ -100,6 +103,9 @@ export class ConversationsController {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cacheReadTokens,
+      cacheWrittenTokens: usage.cacheWrittenTokens,
+      costUsd,
+      durationMs,
     });
     await this.conversations.touch(id);
   }

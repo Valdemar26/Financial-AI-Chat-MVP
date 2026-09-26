@@ -47,16 +47,19 @@ model Conversation {
 }
 
 model Message {
-  id              String       @id @default(uuid())
-  conversationId  String       @map("conversation_id")
-  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  role            String
-  content         String
-  toolUse         Json?        @map("tool_use")
-  inputTokens     Int?         @map("input_tokens")
-  outputTokens    Int?         @map("output_tokens")
-  cacheReadTokens Int?         @map("cache_read_tokens")
-  createdAt       DateTime     @default(now()) @map("created_at")
+  id                 String       @id @default(uuid())
+  conversationId     String       @map("conversation_id")
+  conversation       Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role               String
+  content            String
+  toolUse            Json?        @map("tool_use")
+  inputTokens        Int?         @map("input_tokens")
+  outputTokens       Int?         @map("output_tokens")
+  cacheReadTokens    Int?         @map("cache_read_tokens")
+  cacheWrittenTokens Int?         @map("cache_written_tokens")
+  costUsd            Float?       @map("cost_usd")
+  durationMs         Int?         @map("duration_ms")
+  createdAt          DateTime     @default(now()) @map("created_at")
 
   @@map("messages")
   @@index([conversationId, createdAt])

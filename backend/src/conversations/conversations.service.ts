@@ -13,6 +13,9 @@ export interface AssistantMessageTokens {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  cacheWrittenTokens?: number;
+  costUsd?: number;
+  durationMs?: number;
 }
 
 @Injectable()
@@ -144,6 +147,9 @@ export class ConversationsService {
         inputTokens: tokens.inputTokens,
         outputTokens: tokens.outputTokens,
         cacheReadTokens: tokens.cacheReadTokens,
+        cacheWrittenTokens: tokens.cacheWrittenTokens,
+        costUsd: tokens.costUsd,
+        durationMs: tokens.durationMs,
       },
     });
   }
